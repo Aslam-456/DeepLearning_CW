@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, Dataset
+
 #####################
 # MODELS FOR PART 1 #
 #####################
@@ -36,59 +37,18 @@ class FrequencyBasedClassifier(ConsonantVowelClassifier):
         else:
             return 1
 
+def train_frequency_based_classifier(cons_exs, vowel_exs):
+    consonant_counts = collections.Counter()
+    vowel_counts = collections.Counter()
+    for ex in cons_exs:
+        consonant_counts[ex[-1]] += 1
+    for ex in vowel_exs:
+        vowel_counts[ex[-1]] += 1
+    return FrequencyBasedClassifier(consonant_counts, vowel_counts)
 
-# class RNNClassifier(ConsonantVowelClassifier):
-#     def predict(self, context):
-#         raise Exception("Implement me")
-
-# class RNNClassifier(ConsonantVowelClassifier):
-#     def __init__(self, vocab_size, embed_dim, hidden_dim, output_dim, num_layers=1):
-#         super().__init__()
-#         self.embedding = nn.Embedding(vocab_size, embed_dim)
-#         self.lstm = nn.LSTM(embed_dim, hidden_dim, num_layers=num_layers, batch_first=True)
-#         self.fc = nn.Linear(hidden_dim, output_dim)
-#         self.softmax = nn.Softmax(dim=1)  # Apply softmax for probability outputs
-#
-#     def forward(self, x):
-#         # Add a batch dimension if not using batching
-#         if x.dim() == 1:
-#             x = x.unsqueeze(0)
-#
-#         embedded = self.embedding(x)
-#         # LSTM expects input of shape [batch size, seq length, embed dim] due to batch_first=True
-#         lstm_out, (hidden, _) = self.lstm(embedded)
-#
-#         # We only use the last hidden state from the final LSTM layer
-#         output = self.fc(hidden[-1])
-#         output = self.softmax(output)  # Apply softmax for class probabilities
-#
-#         return output
-#
-#     def predict(self, context, vocab_index):
-#         """
-#         Predicts whether the given context string ends in a consonant or a vowel.
-#
-#         :param context: A raw string of characters to be classified.
-#         :param vocab_index: The Indexer of the character vocabulary.
-#         :return: Predicted class (0 for consonant, 1 for vowel)
-#         """
-#         # Convert the context string to a tensor of indices
-#         input_tensor = string_to_tensor(context, vocab_index)
-#
-#         # Ensure the input tensor has the appropriate batch dimension
-#         input_tensor = input_tensor.unsqueeze(0)  # Adds a batch dimension to make [1, seq length]
-#
-#         # Set the model to evaluation mode
-#         self.eval()
-#
-#         # No gradient computation during prediction
-#         with torch.no_grad():
-#             output = self.forward(input_tensor)
-#
-#         # Get the predicted class (0 for consonant, 1 for vowel)
-#         predicted_class = torch.argmax(output, dim=1).item()
-#
-#         return predicted_class
+#####################
+# RNN Classifier #
+#####################
 
 class RNNClassifier(ConsonantVowelClassifier, nn.Module):  # Ensure correct inheritance
     def __init__(self, vocab_size, embed_dim, hidden_dim, output_dim, vocab_index, num_layers=1):
@@ -114,40 +74,24 @@ class RNNClassifier(ConsonantVowelClassifier, nn.Module):  # Ensure correct inhe
         predicted_class = torch.argmax(output, dim=1).item()
         return predicted_class
 
-def train_frequency_based_classifier(cons_exs, vowel_exs):
-    consonant_counts = collections.Counter()
-    vowel_counts = collections.Counter()
-    for ex in cons_exs:
-        consonant_counts[ex[-1]] += 1
-    for ex in vowel_exs:
-        vowel_counts[ex[-1]] += 1
-    return FrequencyBasedClassifier(consonant_counts, vowel_counts)
-
-
-# def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, dev_vowel_exs, vocab_index):
-#     """
-#     :param args: command-line args, passed through here for your convenience
-#     :param train_cons_exs: list of strings followed by consonants
-#     :param train_vowel_exs: list of strings followed by vowels
-#     :param dev_cons_exs: list of strings followed by consonants
-#     :param dev_vowel_exs: list of strings followed by vowels
-#     :param vocab_index: an Indexer of the character vocabulary (27 characters)
-#     :return: an RNNClassifier instance trained on the given data
-#     """
-#     raise Exception("Implement me")
 
 # def string_to_tensor(s, vocab_index):
 #     """
 #     Converts a raw string to a PyTorch tensor of indices based on the vocab_index.
 #     """
-#     indices = [vocab_index[char] for char in s]  # Convert each character to its index
+#     indices = [vocab_index.index_of(char) for char in s]  # Use index_of to get index of each character
 #     return torch.tensor(indices, dtype=torch.long)
 
-def string_to_tensor(s, vocab_index):
+def string_to_tensor(s, vocab_index, max_length=20):
     """
-    Converts a raw string to a PyTorch tensor of indices based on the vocab_index.
+    Converts a raw string to a PyTorch tensor of indices based on the vocab_index,
+    truncating or padding to max_length.
     """
-    indices = [vocab_index.index_of(char) for char in s]  # Use index_of to get index of each character
+    s = s[:max_length]  # Truncate to max_length if necessary
+    indices = [vocab_index.index_of(char) for char in s]
+    if len(indices) < max_length:
+        # Pad with a padding index (assuming 0 is the padding index)
+        indices += [0] * (max_length - len(indices))
     return torch.tensor(indices, dtype=torch.long)
 
 def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, dev_vowel_exs, vocab_index):
@@ -169,7 +113,7 @@ def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, de
     output_dim = 2  # Binary classification (consonant vs. vowel)
     num_layers = getattr(args, 'num_layers', 1)
     learning_rate = getattr(args, 'learning_rate', 0.001)
-    num_epochs = getattr(args, 'num_epochs', 10)
+    num_epochs = getattr(args, 'num_epochs', 20)
     batch_size = getattr(args, 'batch_size', 32)
 
     # Create model, pass vocab_index during initialization
