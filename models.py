@@ -3,10 +3,24 @@ import torch
 import torch.nn as nn
 import numpy as np
 import collections
+import random
+import torch.optim as optim
+from torch.utils.data import DataLoader
 
 #####################
 # MODELS FOR PART 1 #
 #####################
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True  # Ensures deterministic behavior
+    torch.backends.cudnn.benchmark = False  # Disables benchmark to ensure reproducibility
+
+# Setting a seed value so that the results could be produced again
+set_seed(26)
 
 class ConsonantVowelClassifier(object):
     def predict(self, context):
@@ -33,12 +47,6 @@ class FrequencyBasedClassifier(ConsonantVowelClassifier):
         else:
             return 1
 
-
-class RNNClassifier(ConsonantVowelClassifier):
-    def predict(self, context):
-        raise Exception("Implement me")
-
-
 def train_frequency_based_classifier(cons_exs, vowel_exs):
     consonant_counts = collections.Counter()
     vowel_counts = collections.Counter()
@@ -49,8 +57,53 @@ def train_frequency_based_classifier(cons_exs, vowel_exs):
     return FrequencyBasedClassifier(consonant_counts, vowel_counts)
 
 
+
+#####################
+# RNN Classifier #
+#####################
+
+class RNNClassifier(ConsonantVowelClassifier, nn.Module):  # Ensure correct inheritance
+    def __init__(self, vocab_size, embed_dim, hidden_dim, output_dim, vocab_index, num_layers=1, dropout=0.5):
+        super(RNNClassifier, self).__init__()  # Initialize both parent classes
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, num_layers=num_layers, dropout=dropout, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+        self.dropout = nn.Dropout(dropout)  # Dropout layer
+        self.vocab_index = vocab_index  # Store vocab_index as an attribute
+
+    def forward(self, x):
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        embedded = self.embedding(x)
+        embedded = self.dropout(embedded)  # Apply dropout to embeddings
+        lstm_out, (hidden, _) = self.lstm(embedded)
+        output = self.fc(hidden[-1])
+        return output  # Return raw logits without softmax
+
+    def predict(self, context):
+        input_tensor = string_to_tensor(context, self.vocab_index).unsqueeze(0)  # Access vocab_index from the class
+        self.eval()
+        with torch.no_grad():
+            output = self.forward(input_tensor)
+        predicted_class = torch.argmax(output, dim=1).item()
+        return predicted_class
+
+def string_to_tensor(s, vocab_index, max_length=20):
+    """
+    Converts a raw string to a PyTorch tensor of indices based on the vocab_index,
+    truncating or padding to max_length.
+    """
+    s = s[:max_length]  # Truncate to max_length if necessary
+    indices = [vocab_index.index_of(char) for char in s]
+    if len(indices) < max_length:
+        # Pad with a padding index (assuming 0 is the padding index)
+        indices += [0] * (max_length - len(indices))
+    return torch.tensor(indices, dtype=torch.long)
+
 def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, dev_vowel_exs, vocab_index):
     """
+    Trains an RNNClassifier on the provided training data.
+
     :param args: command-line args, passed through here for your convenience
     :param train_cons_exs: list of strings followed by consonants
     :param train_vowel_exs: list of strings followed by vowels
@@ -59,7 +112,95 @@ def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, de
     :param vocab_index: an Indexer of the character vocabulary (27 characters)
     :return: an RNNClassifier instance trained on the given data
     """
-    raise Exception("Implement me")
+    # Hyperparameters from args
+    vocab_size = len(vocab_index)
+    embed_dim = getattr(args, 'embed_dim', 64)  # Default embedding dimension
+    hidden_dim = getattr(args, 'hidden_dim', 128)  # Default hidden dimension
+    output_dim = 2  # Binary classification (consonant vs. vowel)
+    num_layers = getattr(args, 'num_layers', 1)
+    dropout = getattr(args, 'dropout', 0.6)  # Dropout rate
+    learning_rate = getattr(args, 'learning_rate', 0.001)
+    num_epochs = getattr(args, 'num_epochs', 16)
+    batch_size = getattr(args, 'batch_size', 32)
+
+    # Create model, pass vocab_index during initialization
+    model = RNNClassifier(vocab_size, embed_dim, hidden_dim, output_dim, vocab_index, num_layers, dropout)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Prepare training and validation data
+    train_data = [(string_to_tensor(s, vocab_index), 0) for s in train_cons_exs] + \
+                 [(string_to_tensor(s, vocab_index), 1) for s in train_vowel_exs]
+    dev_data = [(string_to_tensor(s, vocab_index), 0) for s in dev_cons_exs] + \
+               [(string_to_tensor(s, vocab_index), 1) for s in dev_vowel_exs]
+
+    # Convert training data to DataLoader for batching
+    train_tensors = [(s, torch.tensor(label, dtype=torch.long)) for s, label in train_data]
+    dev_tensors = [(s, torch.tensor(label, dtype=torch.long)) for s, label in dev_data]
+
+    train_loader = DataLoader(train_tensors, batch_size=batch_size, shuffle=True, collate_fn=lambda x: x)
+    dev_loader = DataLoader(dev_tensors, batch_size=batch_size, shuffle=False, collate_fn=lambda x: x)
+
+    # Training loop
+    model.train()
+    for epoch in range(num_epochs):
+        total_loss = 0
+        correct = 0
+        total = 0
+
+        for batch in train_loader:
+            # Zero gradients
+            optimizer.zero_grad()
+
+            # Unpack the batch and pad sequences
+            inputs, labels = zip(*batch)
+            inputs = nn.utils.rnn.pad_sequence(inputs, batch_first=True)
+            labels = torch.stack(labels)
+
+            # Forward pass
+            outputs = model(inputs)
+
+            # Compute loss
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+
+            # Compute training accuracy
+            predictions = torch.argmax(outputs, dim=1)
+            correct += (predictions == labels).sum().item()
+            total += labels.size(0)
+
+        train_accuracy = correct / total
+
+        # Validation accuracy
+        model.eval()
+        dev_correct = 0
+        dev_total = 0
+        with torch.no_grad():
+            for dev_batch in dev_loader:
+                dev_inputs, dev_labels = zip(*dev_batch)
+                dev_inputs = nn.utils.rnn.pad_sequence(dev_inputs, batch_first=True)
+                dev_labels = torch.stack(dev_labels)
+
+                dev_outputs = model(dev_inputs)
+                dev_predictions = torch.argmax(dev_outputs, dim=1)
+                dev_correct += (dev_predictions == dev_labels).sum().item()
+                dev_total += dev_labels.size(0)
+
+        dev_accuracy = dev_correct / dev_total
+
+        # Print metrics for this epoch
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {total_loss / len(train_loader):.4f}, "
+              f"Train Accuracy: {train_accuracy * 100:.2f}%, Validation Accuracy: {dev_accuracy * 100:.2f}%")
+
+        # Switch back to training mode
+        model.train()
+
+    return model
+
 
 
 #####################
