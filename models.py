@@ -1,10 +1,10 @@
 # models.py
 import torch
-import torch.nn as nn
+from torch import nn, optim
 import numpy as np
 import collections
 import random
-import torch.optim as optim
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
 #####################
@@ -16,8 +16,8 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True  # Ensures deterministic behavior
-    torch.backends.cudnn.benchmark = False  # Disables benchmark to ensure reproducibility
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # Setting a seed value so that the results could be produced again
 set_seed(26)
@@ -62,93 +62,66 @@ def train_frequency_based_classifier(cons_exs, vowel_exs):
 # RNN Classifier #
 #####################
 
-class RNNClassifier(ConsonantVowelClassifier, nn.Module):  # Ensure correct inheritance
-    def __init__(self, indexer, embed_dim, hidden_dim, output_dim, num_layers=1, dropout=0.6):
-        """
-        Initializes the RNNClassifier with the Indexer for vocabulary management.
-
-        :param indexer: An Indexer instance for managing the vocabulary.
-        :param embed_dim: Dimension of embeddings.
-        :param hidden_dim: Dimension of the LSTM hidden state.
-        :param output_dim: Number of output classes (binary: consonant vs. vowel).
-        :param num_layers: Number of LSTM layers.
-        :param dropout: Dropout rate for regularization.
-        """
+class RNNClassifier(ConsonantVowelClassifier, nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, output_dim, vocab_index, num_layers=1, dropout=0.6):
         super(RNNClassifier, self).__init__()  # Initialize both parent classes
-        self.indexer = indexer
-        self.embedding = nn.Embedding(len(indexer), embed_dim)
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.lstm = nn.LSTM(embed_dim, hidden_dim, num_layers=num_layers, dropout=dropout, batch_first=True)
+        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_dim, output_dim)
-        self.dropout = nn.Dropout(dropout)  # Dropout layer
+        self.output_dropout = nn.Dropout(dropout)
+        self.vocab_index = vocab_index
 
     def forward(self, x):
         if x.dim() == 1:
             x = x.unsqueeze(0)
         embedded = self.embedding(x)
-        embedded = self.dropout(embedded)  # Apply dropout to embeddings
+        embedded = self.dropout(embedded)
         lstm_out, (hidden, _) = self.lstm(embedded)
         output = self.fc(hidden[-1])
-        return output  # Return raw logits without softmax
+        return output
 
     def predict(self, context):
-        input_tensor = string_to_tensor(context, self.indexer).unsqueeze(0)  # Use Indexer for encoding
+        input_tensor = string_to_tensor(context, self.vocab_index).unsqueeze(0)
         self.eval()
         with torch.no_grad():
             output = self.forward(input_tensor)
         predicted_class = torch.argmax(output, dim=1).item()
         return predicted_class
 
+def string_to_tensor(s, vocab_index, max_length=20):
 
-def string_to_tensor(s, indexer, max_length=20):
-    """
-    Converts a raw string to a PyTorch tensor of indices based on the Indexer,
-    truncating or padding to max_length.
-
-    :param s: Input string.
-    :param indexer: Indexer instance for character-to-index mapping.
-    :param max_length: Maximum sequence length.
-    :return: A tensor of indices.
-    """
     s = s[:max_length]  # Truncate to max_length if necessary
-    indices = [indexer.index_of(char) for char in s]
+    indices = [vocab_index.index_of(char) for char in s]
     if len(indices) < max_length:
         # Pad with a padding index (assuming 0 is the padding index)
         indices += [0] * (max_length - len(indices))
     return torch.tensor(indices, dtype=torch.long)
 
 
-def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, dev_vowel_exs, indexer):
-    """
-    Trains an RNNClassifier using the provided Indexer for vocabulary.
+def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, dev_vowel_exs, vocab_index):
 
-    :param args: Command-line args for hyperparameters.
-    :param train_cons_exs: List of strings followed by consonants.
-    :param train_vowel_exs: List of strings followed by vowels.
-    :param dev_cons_exs: List of strings followed by consonants.
-    :param dev_vowel_exs: List of strings followed by vowels.
-    :param indexer: An Indexer instance for vocabulary management.
-    :return: A trained RNNClassifier instance.
-    """
     # Hyperparameters from args
-    embed_dim = getattr(args, 'embed_dim', 64)
-    hidden_dim = getattr(args, 'hidden_dim', 128)
+    vocab_size = len(vocab_index)
+    embed_dim = getattr(args, 'embed_dim', 64)  # Default embedding dimension
+    hidden_dim = getattr(args, 'hidden_dim', 64)  # Default hidden dimension
     output_dim = 2  # Binary classification (consonant vs. vowel)
-    num_layers = getattr(args, 'num_layers', 1)
-    dropout = getattr(args, 'dropout', 0.6)
+    num_layers = getattr(args, 'num_layers', 2)
+    dropout = getattr(args, 'dropout', 0.6)  # Dropout rate
     learning_rate = getattr(args, 'learning_rate', 0.001)
-    num_epochs = getattr(args, 'num_epochs', 16)
+    num_epochs = getattr(args, 'num_epochs', 25)
     batch_size = getattr(args, 'batch_size', 32)
 
-    # Create model, pass Indexer during initialization
-    model = RNNClassifier(indexer, embed_dim, hidden_dim, output_dim, num_layers, dropout)
+    # Model Creation
+    model = RNNClassifier(vocab_size, embed_dim, hidden_dim, output_dim, vocab_index, num_layers, dropout)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-    # Prepare training and validation data
-    train_data = [(string_to_tensor(s, indexer), 0) for s in train_cons_exs] + \
-                 [(string_to_tensor(s, indexer), 1) for s in train_vowel_exs]
-    dev_data = [(string_to_tensor(s, indexer), 0) for s in dev_cons_exs] + \
-               [(string_to_tensor(s, indexer), 1) for s in dev_vowel_exs]
+
+    train_data = [(string_to_tensor(s, vocab_index), 0) for s in train_cons_exs] + \
+                 [(string_to_tensor(s, vocab_index), 1) for s in train_vowel_exs]
+    dev_data = [(string_to_tensor(s, vocab_index), 0) for s in dev_cons_exs] + \
+               [(string_to_tensor(s, vocab_index), 1) for s in dev_vowel_exs]
 
     # Convert training data to DataLoader for batching
     train_tensors = [(s, torch.tensor(label, dtype=torch.long)) for s, label in train_data]
@@ -156,6 +129,12 @@ def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, de
 
     train_loader = DataLoader(train_tensors, batch_size=batch_size, shuffle=True, collate_fn=lambda x: x)
     dev_loader = DataLoader(dev_tensors, batch_size=batch_size, shuffle=False, collate_fn=lambda x: x)
+
+    # Store losses and accuracies needed for plotting
+    train_losses = []
+    dev_losses = []
+    train_accuracies = []
+    dev_accuracies = []
 
     # Training loop
     model.train()
@@ -165,25 +144,37 @@ def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, de
         total = 0
 
         for batch in train_loader:
+
             optimizer.zero_grad()
+
+            # Unpack the batch and pad sequences
             inputs, labels = zip(*batch)
             inputs = nn.utils.rnn.pad_sequence(inputs, batch_first=True)
             labels = torch.stack(labels)
 
+            # Forward pass
             outputs = model(inputs)
+
+            # Compute loss
             loss = criterion(outputs, labels)
             total_loss += loss.item()
+
+            # Backward pass and optimize
             loss.backward()
             optimizer.step()
 
+            # Compute training accuracy
             predictions = torch.argmax(outputs, dim=1)
             correct += (predictions == labels).sum().item()
             total += labels.size(0)
 
         train_accuracy = correct / total
+        train_losses.append(total_loss / len(train_loader))
+        train_accuracies.append(train_accuracy)
 
-        # Validation accuracy
+        # Validation accuracy and loss
         model.eval()
+        dev_loss = 0
         dev_correct = 0
         dev_total = 0
         with torch.no_grad():
@@ -193,16 +184,46 @@ def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, de
                 dev_labels = torch.stack(dev_labels)
 
                 dev_outputs = model(dev_inputs)
+                dev_loss_batch = criterion(dev_outputs, dev_labels)
+                dev_loss += dev_loss_batch.item()
+
                 dev_predictions = torch.argmax(dev_outputs, dim=1)
                 dev_correct += (dev_predictions == dev_labels).sum().item()
                 dev_total += dev_labels.size(0)
 
+        dev_losses.append(dev_loss / len(dev_loader))
         dev_accuracy = dev_correct / dev_total
+        dev_accuracies.append(dev_accuracy)
 
+        # Print accuracy and loss for epoch
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {total_loss / len(train_loader):.4f}, "
               f"Train Accuracy: {train_accuracy * 100:.2f}%, Validation Accuracy: {dev_accuracy * 100:.2f}%")
 
         model.train()
+
+    # Plotting training and validation loss
+
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.plot(range(num_epochs), train_losses, label='Training Loss')
+    plt.plot(range(num_epochs), dev_losses, label='Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+
+    # Plotting the training and validation accuracy
+
+    plt.subplot(1, 2, 2)
+    plt.plot(range(num_epochs), train_accuracies, label='Training Accuracy')
+    plt.plot(range(num_epochs), dev_accuracies, label='Validation Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
 
     return model
 
